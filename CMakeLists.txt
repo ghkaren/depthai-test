@@ -3,31 +3,33 @@ cmake_minimum_required(VERSION 3.2)
 # Add depthai-core dependency
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/depthai-core EXCLUDE_FROM_ALL)
 
-# Create a project with name 'myapp'
-set(TARGET_NAME myapp)
+set(TARGET_NAME test-app)
 project(${TARGET_NAME})
 
-# Dependencies (optional, only used for example)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 find_package(OpenCV REQUIRED)
+
+find_path(LIBUSB_INCLUDE_DIR NAMES libusb.h PATH_SUFFIXES "include" "libusb" "libusb-1.0")
+find_library(LIBUSB_LIBRARY NAMES usb-1.0 PATH_SUFFIXES "lib")
+
 
 # Add source files
 add_executable("${TARGET_NAME}"
-    src/main.cpp
-)
+        src/main.cpp)
 
 # Link with libraries
 target_link_libraries(${TARGET_NAME}
-    PUBLIC
+        PRIVATE
         depthai::opencv
-        ${OpenCV_LIBS} # optional, used for example
-)
+        ${CMAKE_THREAD_LIBS_INIT}
+        PUBLIC ${LIBUSB_LIBRARY}
+        PUBLIC ${OpenCV_LIBS}
+        )
 
-# Set some errors
-if(NOT MSVC)
-    target_compile_options(${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Werror=return-type>)
-endif()
+target_include_directories(${TARGET_NAME}
+        PUBLIC "${LIBUSB_INCLUDE_DIR}"
+        )
 
-# Set compiler features (c++11), and disables extensions (g++)
-set_property(TARGET ${TARGET_NAME} PROPERTY CXX_STANDARD 11)
-set_property(TARGET ${TARGET_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
-set_property(TARGET ${TARGET_NAME} PROPERTY CXX_EXTENSIONS OFF)
+target_compile_options(${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Werror=return-type>)
+set_property(TARGET ${TARGET_NAME} PROPERTY CXX_STANDARD 14)
