@@ -18,6 +18,8 @@ int main(int argc, char** argv) {
     // Create pipeline
     dai::Pipeline pipeline;
 
+    std::cout<<"OpenVINOVersion: " << dai::Pipeline().getOpenVINOVersion() << std::endl;
+
     auto json = pipeline.serializeToJson();
 
     // Define source and output
@@ -35,6 +37,9 @@ int main(int argc, char** argv) {
     camRgb->initialControl.setAntiBandingMode(dai::CameraControl::AntiBandingMode::MAINS_50_HZ);
     camRgb->setFps(30);
     camRgb->setInterleaved(false);
+    camRgb->setPreviewSize(1920, 1080);
+//    camRgb->setFp16(true);
+
 
     xoutVideo->input.setBlocking(false);
     xoutVideo->input.setQueueSize(1);
@@ -61,18 +66,43 @@ int main(int argc, char** argv) {
         imageManip->initialConfig.setResize(1920, 1080);
         imageManip->initialConfig.setFrameType(dai::ImgFrame::Type::NV12);
 
-
         imageManipConfig->out.link(imageManip->inputConfig);
-
-
 
         camRgb->isp.link(imageManip->inputImage);
 //        warp->out.link(imageManip->inputImage);
         imageManip->out.link(xoutVideo->input);
+
+        auto nnManip = pipeline.create<dai::node::ImageManip>();
+        nnManip->initialConfig.setKeepAspectRatio(false);
+        nnManip->initialConfig.setResize(256, 256);
+        nnManip->setMaxOutputFrameSize(256*256*3);
+        nnManip->inputImage.setBlocking(false);
+        nnManip->inputImage.setQueueSize(4);
+
+
+        auto faceDetectionNN = pipeline.create<dai::node::NeuralNetwork>();
+        faceDetectionNN->setBlobPath("/Users/karenghandilyan/Downloads/face_detection_back_21_4.blob");
+        faceDetectionNN->setNumPoolFrames(4);
+//        faceDetectionNN->setConfidenceThreshold(0.5);
+        faceDetectionNN->input.setBlocking(false);
+        faceDetectionNN->input.setQueueSize(1);
+        faceDetectionNN->setNumInferenceThreads(2);
+//        faceDetectionNN->setNumNCEPerInferenceThread(1);
+
+        auto nnOut = pipeline.create<dai::node::XLinkOut>();
+        nnOut->setStreamName("face_out");
+        nnOut->setFpsLimit(30.0);
+        nnOut->input.setBlocking(false);
+        nnOut->input.setQueueSize(1);
+
+        camRgb->preview.link(nnManip->inputImage);
+        nnManip->out.link(faceDetectionNN->input);
+        faceDetectionNN->out.link(nnOut->input);
     }
 
     // Connect to device and start pipeline
     auto config = dai::Device::Config();
+    config.version = dai::Pipeline().getOpenVINOVersion();
 //    config.board.uvcEnable = enableUVC;
     printf("=== Creating device with board config...\n");
     dai::Device device(config);
@@ -87,6 +117,7 @@ int main(int argc, char** argv) {
 
     int qsize = 8;
     bool blocking = false;
+    auto face_out = device.getOutputQueue("face_out", 1, false);
     auto video = device.getOutputQueue("video", qsize, blocking);
     auto controlQueue = device.getInputQueue("control");
     auto bobolQueue = device.getInputQueue("bobol");
@@ -98,6 +129,27 @@ int main(int argc, char** argv) {
     int count = 0;
     cv::namedWindow("video", cv::WINDOW_NORMAL);
     cv::resizeWindow("video", 1920, 1080);
+
+    auto newFrame = [](std::shared_ptr<dai::ADatatype> callback) {
+        if(dynamic_cast<dai::NNData *>(callback.get()) != nullptr) {
+//            auto cast = std::dynamic_pointer_cast<dai::ImgDetections>(callback);
+
+            auto data = callback.get();
+            auto cast_frame = std::dynamic_pointer_cast<dai::NNData>(callback);
+            auto res = cast_frame->getFirstLayerFp16();
+            auto layers = cast_frame->getAllLayerNames();
+            for (auto layer: layers) {
+                auto test = cast_frame->getLayerFp16(layer);
+                std::cout << layer <<": " << test.size() << std::endl;
+            }
+//            if (cast->detections.size() > 0) {
+//                auto res = cast->detections[0];
+//                std::cout<<"confidence: " << res.confidence << "x: "<<res.xmax - res.xmin << " y: " << res.ymax - res.ymin<<std::endl;
+//            }
+
+        }
+    };
+    face_out->addCallback(newFrame);
     while(true) {
         auto videoIn = video->get<dai::ImgFrame>();
 
