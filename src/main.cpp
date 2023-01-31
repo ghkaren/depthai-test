@@ -68,10 +68,6 @@ dai::Pipeline getMainPipeline(bool enableUVC, bool enableUAC) {
         camRgb->isp.link(imageManip->inputImage);
         imageManip->out.link(xoutVideo->input);
     }
-
-
-
-
     return pipeline;
 }
 
@@ -99,8 +95,8 @@ void removeVideoQueueCallback() {
 
 int main(int argc, char** argv) {
     bool enableUVC = false;
-    bool enabelUAC = true;
-    auto pipeline = getMainPipeline(enableUVC, enabelUAC);
+    bool enableUAC = true;
+    auto pipeline = getMainPipeline(enableUVC, enableUAC);
     // Connect to device and start pipeline
     auto config = dai::Device::Config();
     config.board.uvcEnable = enableUVC;
