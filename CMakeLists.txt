@@ -16,7 +16,7 @@ find_library(LIBUSB_LIBRARY NAMES usb-1.0 PATH_SUFFIXES "lib")
 
 # Add source files
 add_executable("${TARGET_NAME}"
-        src/rgb_video.cpp)
+        src/main.cpp)
 
 # Link with libraries
 target_link_libraries(${TARGET_NAME}

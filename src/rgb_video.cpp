@@ -12,7 +12,7 @@ static int clamp(int num, int v0, int v1) {
 static constexpr int LENS_STEP = 3;
 
 int main(int argc, char** argv) {
-    bool enableUVC = 1;
+    bool enableUVC = 0;
     bool enableToF = 0;
     bool enableMic = 0;
     bool enableMicNc = 0;
@@ -70,6 +70,9 @@ int main(int argc, char** argv) {
     if (enableUVC) {
         auto uvc = pipeline.create<dai::node::UVC>();
         camRgb->video.link(uvc->input);
+        uvc->setGpiosOnInit({{58,0}, {37,0}, {34,0}});
+        uvc->setGpiosOnStreamOn({{58,1}, {37,1}, {34,1}});
+        uvc->setGpiosOnStreamOff({{58,0}, {37,0}, {34,0}});
         //camRgb->video.link(xoutVideo->input); // Could actually keep this as well
     } else {
         camRgb->video.link(xoutVideo->input);

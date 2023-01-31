@@ -4,35 +4,33 @@
 #include "depthai/depthai.hpp"
 #include "depthai/pipeline/node/UVC.hpp"
 
-// Pass the argument `uvc` to run in UVC mode
-
 static int clamp(int num, int v0, int v1) {
     return std::max(v0, std::min(num, v1));
 }
 
-int main(int argc, char** argv) {
-    bool rotate = true;
+std::shared_ptr<dai::Device> _device;
+std::shared_ptr<dai::DataOutputQueue> _videoQueue;
+int videoCallbackId = -1;
+std::shared_ptr<dai::DataInputQueue> _controlQueue;
 
+std::queue<cv::Mat> _previewQueue;
+std::mutex _queueMtx;
+
+bool _isStreaming = false;
+
+dai::Pipeline getMainPipeline(bool enableUVC) {
     // Create pipeline
     dai::Pipeline pipeline;
-
-    auto json = pipeline.serializeToJson();
-
     // Define source and output
     auto camRgb = pipeline.create<dai::node::ColorCamera>();
-    auto xoutVideo = pipeline.create<dai::node::XLinkOut>();
-
-    xoutVideo->setStreamName("video");
-
-    // Properties
-    if (rotate)
-        camRgb->setImageOrientation(dai::CameraImageOrientation::ROTATE_180_DEG);
+    camRgb->setImageOrientation(dai::CameraImageOrientation::ROTATE_180_DEG);
     camRgb->setResolution(dai::ColorCameraProperties::SensorResolution::THE_4_K);
-
     camRgb->initialControl.setAntiBandingMode(dai::CameraControl::AntiBandingMode::MAINS_50_HZ);
     camRgb->setFps(30);
     camRgb->setInterleaved(false);
 
+    auto xoutVideo = pipeline.create<dai::node::XLinkOut>();
+    xoutVideo->setStreamName("video");
     xoutVideo->input.setBlocking(false);
     xoutVideo->input.setQueueSize(1);
 
@@ -44,122 +42,102 @@ int main(int argc, char** argv) {
     imageManipConfig->setMaxDataSize(256);
     imageManipConfig->setStreamName("manipConfigQueue");
 
-    // Linking
-    auto imageManip = pipeline.create<dai::node::ImageManip>();
-    imageManip->setMaxOutputFrameSize(3840 * 2140 * 3);
-    imageManip->inputImage.setBlocking(false);
-    imageManip->inputImage.setQueueSize(1);
+    if (enableUVC) {
+        auto uvc = pipeline.create<dai::node::UVC>();
+        uvc->setGpiosOnInit({{58,0}, {37,0}, {34,0}});
+        uvc->setGpiosOnStreamOn({{58,1}, {37,1}, {34,1}});
+        uvc->setGpiosOnStreamOff({{58,0}, {37,0}, {34,0}});
+        camRgb->video.link(uvc->input);
+    } else {
+        // Linking
+        auto imageManip = pipeline.create<dai::node::ImageManip>();
+        imageManip->setMaxOutputFrameSize(3840 * 2140 * 3);
+        imageManip->inputImage.setBlocking(false);
+        imageManip->inputImage.setQueueSize(1);
 
-    imageManip->inputConfig.setWaitForMessage(false);
-    imageManip->initialConfig.setResize(1920, 1080);
-    imageManip->initialConfig.setFrameType(dai::ImgFrame::Type::NV12);
+        imageManip->inputConfig.setWaitForMessage(false);
+        imageManip->initialConfig.setResize(1920, 1080);
+        imageManip->initialConfig.setFrameType(dai::ImgFrame::Type::NV12);
 
-    imageManipConfig->out.link(imageManip->inputConfig);
+        imageManipConfig->out.link(imageManip->inputConfig);
+        camRgb->isp.link(imageManip->inputImage);
+        imageManip->out.link(xoutVideo->input);
+    }
+    return pipeline;
+}
 
-//    camRgb->isp.link(imageManip->inputImage);
-    imageManip->out.link(xoutVideo->input);
+void addVideoQueueCallback() {
+    if(_videoQueue != nullptr) {
+        auto videoCallback = [](std::shared_ptr<dai::ADatatype> data) {
+            if (auto videoFrame = std::dynamic_pointer_cast<dai::ImgFrame>(data)) {
+                printf("new frame: %d x %d\n", videoFrame->getWidth(), videoFrame->getHeight());
+                _previewQueue.push(videoFrame->getCvFrame());
+            }
+        };
+        videoCallbackId = _videoQueue->addCallback(videoCallback);
+    }
+}
 
-    auto uvc = pipeline.create<dai::node::UVC>();
-    camRgb->video.link(uvc->input);
-    uvc->setGpiosOnInit({{58,0}, {37,0}, {34,0}});
-    uvc->setGpiosOnStreamOn({{58,1}, {37,1}, {34,1}});
-    uvc->setGpiosOnStreamOff({{58,0}, {37,0}, {34,0}});
+void removeVideoQueueCallback() {
+    if(_videoQueue != nullptr) {
+        _videoQueue->removeCallback(videoCallbackId);
+    }
+}
 
+int main(int argc, char** argv) {
+    auto pipeline = getMainPipeline(false);
     // Connect to device and start pipeline
     auto config = dai::Device::Config();
     config.board.uvcEnable = true;
     printf("=== Creating device with board config...\n");
-    dai::Device device(config);
+    _device = std::make_shared<dai::Device>(config);
     printf("=== Device created, connected cameras:\n");
-    for (const auto& s : device.getCameraSensorNames()) {
+    for (const auto& s : _device->getCameraSensorNames()) {
         std::cout << "  > " << s.first << " : " << s.second << "\n";
     }
     printf("Starting pipeline...\n");
-    device.startPipeline(pipeline);
+    _device->startPipeline(pipeline);
     printf("=== Started!\n");
+    _isStreaming = true;
+    _videoQueue = _device->getOutputQueue("video", 3, false);
+    _controlQueue = _device->getInputQueue("control", 1, false);
 
+    addVideoQueueCallback();
 
-    int qsize = 8;
-    bool blocking = false;
-    auto video = device.getOutputQueue("video", qsize, blocking);
-    auto controlQueue = device.getInputQueue("control");
-    auto imageManipConfigQ = device.getInputQueue("manipConfigQueue");
-
-    int lensPos = 150;
-
-    using namespace std::chrono;
-    auto tprev = steady_clock::now();
-    int count = 0;
     cv::namedWindow("video", cv::WINDOW_NORMAL);
-    cv::resizeWindow("video", 1920, 1080);
+    cv::resizeWindow("video", 1280, 720);
+
     while(true) {
-        auto videoIn = video->tryGet<dai::ImgFrame>();
-        if (videoIn != nullptr) {
-
-            { // FPS calc
-                auto tnow = steady_clock::now();
-                count++;
-                auto tdiff = duration<double>(tnow - tprev).count();
-                if (tdiff >= 1) {
-                    double fps = count / tdiff;
-                    printf("FPS: %.3f\n", fps);
-                    count = 0;
-                    tprev = tnow;
-                }
+        cv::Mat previewFrame;
+        {
+//            std::unique_lock<std::mutex> lock(_queueMtx);
+            if (!_previewQueue.empty()) {
+                previewFrame = _previewQueue.front();
+                _previewQueue.pop();
             }
-
-            std::string title = std::to_string(videoIn->getWidth()) + "x"+ std::to_string(videoIn->getHeight());
-            // Get BGR frame from NV12 encoded video frame to show with opencv
-            // Visualizing the frame on slower hosts might have overhead
-
-            cv::imshow("video", videoIn->getCvFrame());
-            cv::setWindowTitle("video", title);
         }
-
+        if (!previewFrame.empty()) {
+            cv::imshow("video", previewFrame);
+        }
         int key = cv::waitKey(1);
-        if(key == 'q' || key == 'Q') {
+        if(key == 'q') {
+            if (_device->isPipelineRunning()) {
+                _device->close();
+            }
             break;
-        }  else if(key == 'i' || key == 'o' || key == 'k' || key == 'l' || key == ',' || key == '.') {
-            if(key == 'i') lensPos -= 100;
-            if(key == 'o') lensPos += 100;
-            if(key == 'k') lensPos -= 20;
-            if(key == 'l') lensPos += 20;
-            if(key == ',') lensPos -= 3;
-            if(key == '.') lensPos += 3;
-            lensPos = clamp(lensPos, 0, 255);
-            printf("Setting manual focus, lens position: %d\n", lensPos);
-            dai::CameraControl ctrl;
-            ctrl.setManualFocus(lensPos);
-            controlQueue->send(ctrl);
-        } else if(key == 'w') {
-            dai::ImageManipConfig ctrl;
-            ctrl.setResize(640, 360);
-            ctrl.setKeepAspectRatio(true);
-            imageManipConfigQ->send(ctrl);
-        } else if(key == 'e') {
-            dai::ImageManipConfig ctrl;
-            ctrl.setResize(1280, 720);
-            ctrl.setKeepAspectRatio(true);
-            imageManipConfigQ->send(ctrl);
-        } else if(key == 'r') {
-            dai::ImageManipConfig ctrl;
-            ctrl.setResize(1920, 1080);
-            ctrl.setKeepAspectRatio(true);
-            imageManipConfigQ->send(ctrl);
-        } else if(key == 't') {
-            dai::ImageManipConfig ctrl;
-            ctrl.setResize(3840, 2160);
-            ctrl.setKeepAspectRatio(true);
-            imageManipConfigQ->send(ctrl);
         } else if(key == 's') {
             dai::CameraControl ctrl;
-            ctrl.setStartStreaming();
-            ctrl.setAutoFocusMode(dai::CameraControl::AutoFocusMode::CONTINUOUS_VIDEO);
-            controlQueue->send(ctrl);
-        } else if(key == 'd') {
-            dai::CameraControl ctrl;
+            if (_isStreaming) {
+                ctrl.setStopStreaming();
+                removeVideoQueueCallback();
+            } else {
+                ctrl.setStartStreaming();
+                ctrl.setAutoFocusMode(dai::CameraControl::AutoFocusMode::CONTINUOUS_VIDEO);
+                addVideoQueueCallback();
+            }
+            _isStreaming = !_isStreaming;
             ctrl.setStopStreaming();
-            controlQueue->send(ctrl);
+            _controlQueue->send(ctrl);
         }
     }
     return 0;
