@@ -3,6 +3,7 @@
 // Includes common necessary includes for development using depthai library
 #include "depthai/depthai.hpp"
 #include "depthai/pipeline/node/UVC.hpp"
+#include <depthai/pipeline/node/UAC.hpp>
 
 std::shared_ptr<dai::Device> _device;
 std::shared_ptr<dai::DataOutputQueue> _videoQueue;
@@ -14,7 +15,7 @@ std::mutex _queueMtx;
 
 bool _isStreaming = false;
 
-dai::Pipeline getMainPipeline(bool enableUVC) {
+dai::Pipeline getMainPipeline(bool enableUVC, bool enableUAC) {
     // Create pipeline
     dai::Pipeline pipeline;
     // Define source and output
@@ -38,6 +39,14 @@ dai::Pipeline getMainPipeline(bool enableUVC) {
     imageManipConfig->setMaxDataSize(256);
     imageManipConfig->setStreamName("manipConfigQueue");
 
+    if (enableUAC) {
+        auto uac = pipeline.create<dai::node::UAC>();
+        auto mic = pipeline.create<dai::node::AudioMic>();
+        mic->setStreamBackMic(false);
+        mic->out.link(uac->input);
+        uac->initialConfig.setMicGainDecibels(28);
+    }
+
     if (enableUVC) {
         auto uvc = pipeline.create<dai::node::UVC>();
         uvc->setGpiosOnInit({{58,0}, {37,0}, {34,0}});
@@ -59,6 +68,10 @@ dai::Pipeline getMainPipeline(bool enableUVC) {
         camRgb->isp.link(imageManip->inputImage);
         imageManip->out.link(xoutVideo->input);
     }
+
+
+
+
     return pipeline;
 }
 
@@ -66,12 +79,13 @@ void addVideoQueueCallback() {
     if(_videoQueue != nullptr && videoCallbackId == -1) {
         auto videoCallback = [](std::shared_ptr<dai::ADatatype> data) {
             if (auto videoFrame = std::dynamic_pointer_cast<dai::ImgFrame>(data)) {
-                printf("new frame: %d x %d\n", videoFrame->getWidth(), videoFrame->getHeight());
+//                printf("new frame: %d x %d\n", videoFrame->getWidth(), videoFrame->getHeight());
                 std::unique_lock<std::mutex> lock(_queueMtx);
                 _previewQueue.push(videoFrame->getCvFrame());
             }
         };
         videoCallbackId = _videoQueue->addCallback(videoCallback);
+        printf("Callback added\n");
     }
 }
 
@@ -79,12 +93,14 @@ void removeVideoQueueCallback() {
     if(_videoQueue != nullptr && videoCallbackId != -1) {
         _videoQueue->removeCallback(videoCallbackId);
         videoCallbackId = -1;
+        printf("Callback removed\n");
     }
 }
 
 int main(int argc, char** argv) {
     bool enableUVC = false;
-    auto pipeline = getMainPipeline(enableUVC);
+    bool enabelUAC = true;
+    auto pipeline = getMainPipeline(enableUVC, enabelUAC);
     // Connect to device and start pipeline
     auto config = dai::Device::Config();
     config.board.uvcEnable = enableUVC;
