@@ -4,10 +4,6 @@
 #include "depthai/depthai.hpp"
 #include "depthai/pipeline/node/UVC.hpp"
 
-static int clamp(int num, int v0, int v1) {
-    return std::max(v0, std::min(num, v1));
-}
-
 std::shared_ptr<dai::Device> _device;
 std::shared_ptr<dai::DataOutputQueue> _videoQueue;
 int videoCallbackId = -1;
@@ -67,10 +63,11 @@ dai::Pipeline getMainPipeline(bool enableUVC) {
 }
 
 void addVideoQueueCallback() {
-    if(_videoQueue != nullptr) {
+    if(_videoQueue != nullptr && videoCallbackId == -1) {
         auto videoCallback = [](std::shared_ptr<dai::ADatatype> data) {
             if (auto videoFrame = std::dynamic_pointer_cast<dai::ImgFrame>(data)) {
                 printf("new frame: %d x %d\n", videoFrame->getWidth(), videoFrame->getHeight());
+                std::unique_lock<std::mutex> lock(_queueMtx);
                 _previewQueue.push(videoFrame->getCvFrame());
             }
         };
@@ -79,16 +76,18 @@ void addVideoQueueCallback() {
 }
 
 void removeVideoQueueCallback() {
-    if(_videoQueue != nullptr) {
+    if(_videoQueue != nullptr && videoCallbackId != -1) {
         _videoQueue->removeCallback(videoCallbackId);
+        videoCallbackId = -1;
     }
 }
 
 int main(int argc, char** argv) {
-    auto pipeline = getMainPipeline(false);
+    bool enableUVC = false;
+    auto pipeline = getMainPipeline(enableUVC);
     // Connect to device and start pipeline
     auto config = dai::Device::Config();
-    config.board.uvcEnable = true;
+    config.board.uvcEnable = enableUVC;
     printf("=== Creating device with board config...\n");
     _device = std::make_shared<dai::Device>(config);
     printf("=== Device created, connected cameras:\n");
@@ -103,14 +102,13 @@ int main(int argc, char** argv) {
     _controlQueue = _device->getInputQueue("control", 1, false);
 
     addVideoQueueCallback();
-
     cv::namedWindow("video", cv::WINDOW_NORMAL);
     cv::resizeWindow("video", 1280, 720);
 
     while(true) {
         cv::Mat previewFrame;
         {
-//            std::unique_lock<std::mutex> lock(_queueMtx);
+        std::unique_lock<std::mutex> lock(_queueMtx);
             if (!_previewQueue.empty()) {
                 previewFrame = _previewQueue.front();
                 _previewQueue.pop();
@@ -119,6 +117,7 @@ int main(int argc, char** argv) {
         if (!previewFrame.empty()) {
             cv::imshow("video", previewFrame);
         }
+
         int key = cv::waitKey(1);
         if(key == 'q') {
             if (_device->isPipelineRunning()) {
@@ -130,13 +129,14 @@ int main(int argc, char** argv) {
             if (_isStreaming) {
                 ctrl.setStopStreaming();
                 removeVideoQueueCallback();
+                printf("Stopped video streaming\n");
             } else {
                 ctrl.setStartStreaming();
                 ctrl.setAutoFocusMode(dai::CameraControl::AutoFocusMode::CONTINUOUS_VIDEO);
                 addVideoQueueCallback();
+                printf("Started video streaming\n");
             }
             _isStreaming = !_isStreaming;
-            ctrl.setStopStreaming();
             _controlQueue->send(ctrl);
         }
     }
